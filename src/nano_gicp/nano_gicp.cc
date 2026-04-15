@@ -373,11 +373,11 @@ bool NanoGICP<PointSource, PointTarget>::calculate_covariances(
           values = Eigen::Vector3d(1, 1, 1e-3);
           break;
         case RegularizationMethod::MIN_EIG:
-          values = svd.singularValues().array().max(1e-3);
+          values = svd.singularValues().cwiseMax(1e-3);
           break;
         case RegularizationMethod::NORMALIZED_MIN_EIG:
           values = svd.singularValues() / svd.singularValues().maxCoeff();
-          values = values.array().max(1e-3);
+          values = values.cwiseMax(1e-3);
           break;
       }
 

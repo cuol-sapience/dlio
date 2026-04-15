@@ -139,8 +139,8 @@ bool LsqRegistration<PointTarget, PointSource>::is_converged(const Eigen::Isomet
   Eigen::Matrix3d R = delta.linear() - Eigen::Matrix3d::Identity();
   Eigen::Vector3d t = delta.translation();
 
-  Eigen::Matrix3d r_delta = 1.0 / rotation_epsilon_ * R.array().abs();
-  Eigen::Vector3d t_delta = 1.0 / transformation_epsilon_ * t.array().abs();
+  Eigen::Matrix3d r_delta = 1.0 / rotation_epsilon_ * R.cwiseAbs();
+  Eigen::Vector3d t_delta = 1.0 / transformation_epsilon_ * t.cwiseAbs();
 
   return std::max(r_delta.maxCoeff(), t_delta.maxCoeff()) < 1;
 }
@@ -184,7 +184,7 @@ bool LsqRegistration<PointTarget, PointSource>::step_lm(Eigen::Isometry3d& x0, E
   double y0 = linearize(x0, &H, &b);
 
   if (lm_lambda_ < 0.0) {
-    lm_lambda_ = lm_init_lambda_factor_ * H.diagonal().array().abs().maxCoeff();
+    lm_lambda_ = lm_init_lambda_factor_ * H.diagonal().cwiseAbs().maxCoeff();
   }
 
   double nu = 2.0;
