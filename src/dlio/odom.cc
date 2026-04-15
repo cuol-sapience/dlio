@@ -1339,13 +1339,13 @@ void dlio::OdomNode::updateState() {
 
   // Update accel bias
   this->state.b.accel -= dt * this->geo_Kab_ * err_body;
-  this->state.b.accel = this->state.b.accel.cwiseMin(abias_max).max(-abias_max);
+  this->state.b.accel = this->state.b.accel.cwiseMin(abias_max).cwiseMax(-abias_max);
 
   // Update gyro bias
   this->state.b.gyro[0] -= dt * this->geo_Kgb_ * qe.w() * qe.x();
   this->state.b.gyro[1] -= dt * this->geo_Kgb_ * qe.w() * qe.y();
   this->state.b.gyro[2] -= dt * this->geo_Kgb_ * qe.w() * qe.z();
-  this->state.b.gyro = this->state.b.gyro.cwiseMin(gbias_max).max(-gbias_max);
+  this->state.b.gyro = this->state.b.gyro.cwiseMin(gbias_max).cwiseMax(-gbias_max);
 
   // Update state
   this->state.p += dt * this->geo_Kp_ * err;
