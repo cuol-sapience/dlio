@@ -159,6 +159,8 @@ private:
   std::vector<std::shared_ptr<const nano_gicp::CovarianceList>> keyframe_normals;
   std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>> keyframe_transformations;
   std::mutex keyframes_mutex;
+  std::mutex mtx_debug;   // protects trajectory, comp_times, lidar_rates, cpu_percents, lastCPU/Sys/User
+  std::mutex mtx_metrics; // protects metrics.spaciousness, metrics.density
 
   // Sensor Type
   dlio::SensorType sensor;

@@ -319,27 +319,39 @@ void dlio::OdomNode::start() {
 
 void dlio::OdomNode::publishPose() {
 
+  // Snapshot state under geo.mtx — timer thread races with propagateState/updateState
+  Eigen::Vector3f p;
+  Eigen::Quaternionf q;
+  Eigen::Vector3f v_lin_w, v_ang_b;
+  {
+    std::lock_guard<std::mutex> lock(this->geo.mtx);
+    p       = this->state.p;
+    q       = this->state.q;
+    v_lin_w = this->state.v.lin.w;
+    v_ang_b = this->state.v.ang.b;
+  }
+
   // nav_msgs::msg::Odometry
   this->odom_ros.header.stamp = this->imu_stamp;
   this->odom_ros.header.frame_id = this->odom_frame;
   this->odom_ros.child_frame_id = this->baselink_frame;
 
-  this->odom_ros.pose.pose.position.x = this->state.p[0];
-  this->odom_ros.pose.pose.position.y = this->state.p[1];
-  this->odom_ros.pose.pose.position.z = this->state.p[2];
+  this->odom_ros.pose.pose.position.x = p[0];
+  this->odom_ros.pose.pose.position.y = p[1];
+  this->odom_ros.pose.pose.position.z = p[2];
 
-  this->odom_ros.pose.pose.orientation.w = this->state.q.w();
-  this->odom_ros.pose.pose.orientation.x = this->state.q.x();
-  this->odom_ros.pose.pose.orientation.y = this->state.q.y();
-  this->odom_ros.pose.pose.orientation.z = this->state.q.z();
+  this->odom_ros.pose.pose.orientation.w = q.w();
+  this->odom_ros.pose.pose.orientation.x = q.x();
+  this->odom_ros.pose.pose.orientation.y = q.y();
+  this->odom_ros.pose.pose.orientation.z = q.z();
 
-  this->odom_ros.twist.twist.linear.x = this->state.v.lin.w[0];
-  this->odom_ros.twist.twist.linear.y = this->state.v.lin.w[1];
-  this->odom_ros.twist.twist.linear.z = this->state.v.lin.w[2];
+  this->odom_ros.twist.twist.linear.x = v_lin_w[0];
+  this->odom_ros.twist.twist.linear.y = v_lin_w[1];
+  this->odom_ros.twist.twist.linear.z = v_lin_w[2];
 
-  this->odom_ros.twist.twist.angular.x = this->state.v.ang.b[0];
-  this->odom_ros.twist.twist.angular.y = this->state.v.ang.b[1];
-  this->odom_ros.twist.twist.angular.z = this->state.v.ang.b[2];
+  this->odom_ros.twist.twist.angular.x = v_ang_b[0];
+  this->odom_ros.twist.twist.angular.y = v_ang_b[1];
+  this->odom_ros.twist.twist.angular.z = v_ang_b[2];
 
   this->odom_pub->publish(this->odom_ros);
 
@@ -347,14 +359,14 @@ void dlio::OdomNode::publishPose() {
   this->pose_ros.header.stamp = this->imu_stamp;
   this->pose_ros.header.frame_id = this->odom_frame;
 
-  this->pose_ros.pose.position.x = this->state.p[0];
-  this->pose_ros.pose.position.y = this->state.p[1];
-  this->pose_ros.pose.position.z = this->state.p[2];
+  this->pose_ros.pose.position.x = p[0];
+  this->pose_ros.pose.position.y = p[1];
+  this->pose_ros.pose.position.z = p[2];
 
-  this->pose_ros.pose.orientation.w = this->state.q.w();
-  this->pose_ros.pose.orientation.x = this->state.q.x();
-  this->pose_ros.pose.orientation.y = this->state.q.y();
-  this->pose_ros.pose.orientation.z = this->state.q.z();
+  this->pose_ros.pose.orientation.w = q.w();
+  this->pose_ros.pose.orientation.x = q.x();
+  this->pose_ros.pose.orientation.y = q.y();
+  this->pose_ros.pose.orientation.z = q.z();
 
   this->pose_pub->publish(this->pose_ros);
 
@@ -363,22 +375,31 @@ void dlio::OdomNode::publishPose() {
 void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud) {
   this->publishCloud(published_cloud, T_cloud);
 
+  // Snapshot state under geo.mtx — detached thread races with propagateState/updateState
+  Eigen::Vector3f p;
+  Eigen::Quaternionf q;
+  {
+    std::lock_guard<std::mutex> lock(this->geo.mtx);
+    p = this->state.p;
+    q = this->state.q;
+  }
+
   // nav_msgs::msg::Path
   this->path_ros.header.stamp = this->imu_stamp;
   this->path_ros.header.frame_id = this->odom_frame;
 
-  geometry_msgs::msg::PoseStamped p;
-  p.header.stamp = this->imu_stamp;
-  p.header.frame_id = this->odom_frame;
-  p.pose.position.x = this->state.p[0];
-  p.pose.position.y = this->state.p[1];
-  p.pose.position.z = this->state.p[2];
-  p.pose.orientation.w = this->state.q.w();
-  p.pose.orientation.x = this->state.q.x();
-  p.pose.orientation.y = this->state.q.y();
-  p.pose.orientation.z = this->state.q.z();
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.stamp = this->imu_stamp;
+  pose.header.frame_id = this->odom_frame;
+  pose.pose.position.x = p[0];
+  pose.pose.position.y = p[1];
+  pose.pose.position.z = p[2];
+  pose.pose.orientation.w = q.w();
+  pose.pose.orientation.x = q.x();
+  pose.pose.orientation.y = q.y();
+  pose.pose.orientation.z = q.z();
 
-  this->path_ros.poses.push_back(p);
+  this->path_ros.poses.push_back(pose);
   this->path_pub->publish(this->path_ros);
 
   // transform: odom to baselink
@@ -388,14 +409,14 @@ void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published
   transformStamped.header.frame_id = this->odom_frame;
   transformStamped.child_frame_id = this->baselink_frame;
 
-  transformStamped.transform.translation.x = this->state.p[0];
-  transformStamped.transform.translation.y = this->state.p[1];
-  transformStamped.transform.translation.z = this->state.p[2];
+  transformStamped.transform.translation.x = p[0];
+  transformStamped.transform.translation.y = p[1];
+  transformStamped.transform.translation.z = p[2];
 
-  transformStamped.transform.rotation.w = this->state.q.w();
-  transformStamped.transform.rotation.x = this->state.q.x();
-  transformStamped.transform.rotation.y = this->state.q.y();
-  transformStamped.transform.rotation.z = this->state.q.z();
+  transformStamped.transform.rotation.w = q.w();
+  transformStamped.transform.rotation.x = q.x();
+  transformStamped.transform.rotation.y = q.y();
+  transformStamped.transform.rotation.z = q.z();
 
   br->sendTransform(transformStamped);
 
@@ -826,11 +847,12 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
     this->submap_build_cv.notify_one();
   }
 
-  // Update trajectory
-  this->trajectory.push_back( std::make_pair(this->state.p, this->state.q) );
-
-  // Update time stamps
-  this->lidar_rates.push_back( 1. / (this->scan_stamp - this->prev_scan_stamp) );
+  // Update trajectory and lidar rate (protected against concurrent debug() reads)
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_debug);
+    this->trajectory.push_back(std::make_pair(this->state.p, this->state.q));
+    this->lidar_rates.push_back(1. / (this->scan_stamp - this->prev_scan_stamp));
+  }
   this->prev_scan_stamp = this->scan_stamp;
   this->elapsed_time = this->scan_stamp - this->first_scan_stamp;
 
@@ -844,8 +866,11 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   this->publish_thread = std::thread( &dlio::OdomNode::publishToROS, this, published_cloud, this->T_corr );
   this->publish_thread.detach();
 
-  // Update some statistics
-  this->comp_times.push_back(this->now().seconds() - then);
+  // Update some statistics (protected against concurrent debug() reads)
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_debug);
+    this->comp_times.push_back(this->now().seconds() - then);
+  }
   this->gicp_hasConverged = this->gicp.hasConverged();
 
   // Debug statements and publish custom DLIO message
@@ -887,6 +912,8 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
     static Eigen::Vector3f gyro_avg (0., 0., 0.);
     static Eigen::Vector3f accel_avg (0., 0., 0.);
     static bool print = true;
+
+    this->mtx_imu.lock();
 
     if ((imu_stamp_secs - this->first_imu_stamp) < this->imu_calib_time_) {
 
@@ -968,26 +995,30 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
 
     }
 
+    this->mtx_imu.unlock();
+
   } else {
+
+    Eigen::Vector3f lin_accel_corrected = (this->imu_accel_sm_ * lin_accel) - this->state.b.accel;
+    Eigen::Vector3f ang_vel_corrected = ang_vel - this->state.b.gyro;
+
+    // Apply the calibrated bias to the new IMU measurements and store in buffer.
+    // mtx_imu covers imu_rates, prev_imu_stamp, imu_meas, and imu_buffer together
+    // to prevent concurrent callbackImu executions from racing on these members.
+    this->mtx_imu.lock();
 
     double dt = imu_stamp_secs - this->prev_imu_stamp;
     if (dt == 0) { dt = 1.0/200.0; }
     this->imu_rates.push_back( 1./dt );
 
-    // Apply the calibrated bias to the new IMU measurements
     this->imu_meas.stamp = imu_stamp_secs;
     this->imu_meas.dt = dt;
     this->prev_imu_stamp = this->imu_meas.stamp;
-
-    Eigen::Vector3f lin_accel_corrected = (this->imu_accel_sm_ * lin_accel) - this->state.b.accel;
-    Eigen::Vector3f ang_vel_corrected = ang_vel - this->state.b.gyro;
-
     this->imu_meas.lin_accel = lin_accel_corrected;
     this->imu_meas.ang_vel = ang_vel_corrected;
 
-    // Store calibrated IMU measurements into imu buffer for manual integration later.
-    this->mtx_imu.lock();
     this->imu_buffer.push_front(this->imu_meas);
+
     this->mtx_imu.unlock();
 
     // Notify the callbackPointCloud thread that IMU data exists for this time
@@ -1436,6 +1467,7 @@ void dlio::OdomNode::computeSpaciousness() {
   median_prev = median_lpf;
 
   // push
+  std::lock_guard<std::mutex> lock(this->mtx_metrics);
   this->metrics.spaciousness.push_back( median_lpf );
 
 }
@@ -1454,6 +1486,7 @@ void dlio::OdomNode::computeDensity() {
   float density_lpf = 0.95*density_prev + 0.05*density;
   density_prev = density_lpf;
 
+  std::lock_guard<std::mutex> lock(this->mtx_metrics);
   this->metrics.density.push_back( density_lpf );
 
 }
@@ -1617,16 +1650,21 @@ void dlio::OdomNode::updateKeyframes() {
 
 void dlio::OdomNode::setAdaptiveParams() {
 
-  // Spaciousness
-  float sp = this->metrics.spaciousness.back();
+  // Snapshot metrics under mtx_metrics — computeMetrics runs on a detached thread
+  float sp, den;
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_metrics);
+    sp  = this->metrics.spaciousness.back();
+    den = this->metrics.density.back();
+  }
 
+  // Spaciousness
   if (sp < 0.5) { sp = 0.5; }
   if (sp > 5.0) { sp = 5.0; }
 
   this->keyframe_thresh_dist_ = sp;
 
   // Density
-  float den = this->metrics.density.back();
 
   if (den < 0.5*this->gicp_max_corr_dist_) { den = 0.5*this->gicp_max_corr_dist_; }
   if (den > 2.0*this->gicp_max_corr_dist_) { den = 2.0*this->gicp_max_corr_dist_; }
@@ -1804,11 +1842,42 @@ void dlio::OdomNode::pauseSubmapBuildIfNeeded() {
 
 void dlio::OdomNode::debug() {
 
+  // Snapshot vectors written by the lidar callback and by concurrent debug() invocations.
+  // Each vector has a dedicated lock; take them one at a time to avoid ordering issues.
+  std::vector<std::pair<Eigen::Vector3f, Eigen::Quaternionf>> traj_snap;
+  std::vector<double> comp_times_snap;
+  std::vector<double> lidar_rates_snap;
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_debug);
+    traj_snap       = this->trajectory;
+    comp_times_snap = this->comp_times;
+    lidar_rates_snap = this->lidar_rates;
+  }
+
+  std::vector<double> imu_rates_snap;
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_imu);
+    imu_rates_snap = this->imu_rates;
+  }
+
+  // Snapshot state for printing — concurrent with propagateState/updateState
+  Eigen::Vector3f state_p, state_v_lin_b, state_v_ang_b, state_b_accel, state_b_gyro;
+  Eigen::Quaternionf state_q;
+  {
+    std::lock_guard<std::mutex> lock(this->geo.mtx);
+    state_p       = this->state.p;
+    state_q       = this->state.q;
+    state_v_lin_b = this->state.v.lin.b;
+    state_v_ang_b = this->state.v.ang.b;
+    state_b_accel = this->state.b.accel;
+    state_b_gyro  = this->state.b.gyro;
+  }
+
   // Total length traversed
   double length_traversed = 0.;
   Eigen::Vector3f p_curr = Eigen::Vector3f(0., 0., 0.);
   Eigen::Vector3f p_prev = Eigen::Vector3f(0., 0., 0.);
-  for (const auto& t : this->trajectory) {
+  for (const auto& t : traj_snap) {
     if (p_prev == Eigen::Vector3f(0., 0., 0.)) {
       p_prev = t.first;
       continue;
@@ -1825,25 +1894,25 @@ void dlio::OdomNode::debug() {
 
   // Average computation time
   double avg_comp_time =
-    std::accumulate(this->comp_times.begin(), this->comp_times.end(), 0.0) / this->comp_times.size();
+    std::accumulate(comp_times_snap.begin(), comp_times_snap.end(), 0.0) / comp_times_snap.size();
 
   // Average sensor rates
   int win_size = 100;
   double avg_imu_rate;
   double avg_lidar_rate;
-  if (this->imu_rates.size() < win_size) {
+  if (imu_rates_snap.size() < win_size) {
     avg_imu_rate =
-      std::accumulate(this->imu_rates.begin(), this->imu_rates.end(), 0.0) / this->imu_rates.size();
+      std::accumulate(imu_rates_snap.begin(), imu_rates_snap.end(), 0.0) / imu_rates_snap.size();
   } else {
     avg_imu_rate =
-      std::accumulate(this->imu_rates.end()-win_size, this->imu_rates.end(), 0.0) / win_size;
+      std::accumulate(imu_rates_snap.end()-win_size, imu_rates_snap.end(), 0.0) / win_size;
   }
-  if (this->lidar_rates.size() < win_size) {
+  if (lidar_rates_snap.size() < win_size) {
     avg_lidar_rate =
-      std::accumulate(this->lidar_rates.begin(), this->lidar_rates.end(), 0.0) / this->lidar_rates.size();
+      std::accumulate(lidar_rates_snap.begin(), lidar_rates_snap.end(), 0.0) / lidar_rates_snap.size();
   } else {
     avg_lidar_rate =
-      std::accumulate(this->lidar_rates.end()-win_size, this->lidar_rates.end(), 0.0) / win_size;
+      std::accumulate(lidar_rates_snap.end()-win_size, lidar_rates_snap.end(), 0.0) / win_size;
   }
 
   // RAM Usage
@@ -1865,26 +1934,31 @@ void dlio::OdomNode::debug() {
   vm_usage = vsize / 1024.0;
   resident_set = rss * page_size_kb;
 
-  // CPU Usage
+  // CPU Usage — lastCPU* and cpu_percents are shared across concurrent debug() invocations
   struct tms timeSample;
   clock_t now;
   double cpu_percent;
-  now = times(&timeSample);
-  if (now <= this->lastCPU || timeSample.tms_stime < this->lastSysCPU ||
-      timeSample.tms_utime < this->lastUserCPU) {
-      cpu_percent = -1.0;
-  } else {
-      cpu_percent = (timeSample.tms_stime - this->lastSysCPU) + (timeSample.tms_utime - this->lastUserCPU);
-      cpu_percent /= (now - this->lastCPU);
-      cpu_percent /= this->numProcessors;
-      cpu_percent *= 100.;
+  std::vector<double> cpu_percents_snap;
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_debug);
+    now = times(&timeSample);
+    if (now <= this->lastCPU || timeSample.tms_stime < this->lastSysCPU ||
+        timeSample.tms_utime < this->lastUserCPU) {
+        cpu_percent = -1.0;
+    } else {
+        cpu_percent = (timeSample.tms_stime - this->lastSysCPU) + (timeSample.tms_utime - this->lastUserCPU);
+        cpu_percent /= (now - this->lastCPU);
+        cpu_percent /= this->numProcessors;
+        cpu_percent *= 100.;
+    }
+    this->lastCPU = now;
+    this->lastSysCPU = timeSample.tms_stime;
+    this->lastUserCPU = timeSample.tms_utime;
+    this->cpu_percents.push_back(cpu_percent);
+    cpu_percents_snap = this->cpu_percents;
   }
-  this->lastCPU = now;
-  this->lastSysCPU = timeSample.tms_stime;
-  this->lastUserCPU = timeSample.tms_utime;
-  this->cpu_percents.push_back(cpu_percent);
   double avg_cpu_usage =
-    std::accumulate(this->cpu_percents.begin(), this->cpu_percents.end(), 0.0) / this->cpu_percents.size();
+    std::accumulate(cpu_percents_snap.begin(), cpu_percents_snap.end(), 0.0) / cpu_percents_snap.size();
 
   // Print to terminal
   printf("\033[2J\033[1;1H");
@@ -1938,35 +2012,35 @@ void dlio::OdomNode::debug() {
   std::cout << "|===================================================================|" << std::endl;
 
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
-    << "Position     {W}  [xyz] :: " + to_string_with_precision(this->state.p[0], 4) + " "
-                                + to_string_with_precision(this->state.p[1], 4) + " "
-                                + to_string_with_precision(this->state.p[2], 4)
+    << "Position     {W}  [xyz] :: " + to_string_with_precision(state_p[0], 4) + " "
+                                + to_string_with_precision(state_p[1], 4) + " "
+                                + to_string_with_precision(state_p[2], 4)
     << "|" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
-    << "Orientation  {W} [wxyz] :: " + to_string_with_precision(this->state.q.w(), 4) + " "
-                                + to_string_with_precision(this->state.q.x(), 4) + " "
-                                + to_string_with_precision(this->state.q.y(), 4) + " "
-                                + to_string_with_precision(this->state.q.z(), 4)
+    << "Orientation  {W} [wxyz] :: " + to_string_with_precision(state_q.w(), 4) + " "
+                                + to_string_with_precision(state_q.x(), 4) + " "
+                                + to_string_with_precision(state_q.y(), 4) + " "
+                                + to_string_with_precision(state_q.z(), 4)
     << "|" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
-    << "Lin Velocity {B}  [xyz] :: " + to_string_with_precision(this->state.v.lin.b[0], 4) + " "
-                                + to_string_with_precision(this->state.v.lin.b[1], 4) + " "
-                                + to_string_with_precision(this->state.v.lin.b[2], 4)
+    << "Lin Velocity {B}  [xyz] :: " + to_string_with_precision(state_v_lin_b[0], 4) + " "
+                                + to_string_with_precision(state_v_lin_b[1], 4) + " "
+                                + to_string_with_precision(state_v_lin_b[2], 4)
     << "|" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
-    << "Ang Velocity {B}  [xyz] :: " + to_string_with_precision(this->state.v.ang.b[0], 4) + " "
-                                + to_string_with_precision(this->state.v.ang.b[1], 4) + " "
-                                + to_string_with_precision(this->state.v.ang.b[2], 4)
+    << "Ang Velocity {B}  [xyz] :: " + to_string_with_precision(state_v_ang_b[0], 4) + " "
+                                + to_string_with_precision(state_v_ang_b[1], 4) + " "
+                                + to_string_with_precision(state_v_ang_b[2], 4)
     << "|" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
-    << "Accel Bias        [xyz] :: " + to_string_with_precision(this->state.b.accel[0], 8) + " "
-                                + to_string_with_precision(this->state.b.accel[1], 8) + " "
-                                + to_string_with_precision(this->state.b.accel[2], 8)
+    << "Accel Bias        [xyz] :: " + to_string_with_precision(state_b_accel[0], 8) + " "
+                                + to_string_with_precision(state_b_accel[1], 8) + " "
+                                + to_string_with_precision(state_b_accel[2], 8)
     << "|" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
-    << "Gyro Bias         [xyz] :: " + to_string_with_precision(this->state.b.gyro[0], 8) + " "
-                                + to_string_with_precision(this->state.b.gyro[1], 8) + " "
-                                + to_string_with_precision(this->state.b.gyro[2], 8)
+    << "Gyro Bias         [xyz] :: " + to_string_with_precision(state_b_gyro[0], 8) + " "
+                                + to_string_with_precision(state_b_gyro[1], 8) + " "
+                                + to_string_with_precision(state_b_gyro[2], 8)
     << "|" << std::endl;
 
   std::cout << "|                                                                   |" << std::endl;
@@ -1976,9 +2050,9 @@ void dlio::OdomNode::debug() {
     << "|" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
     << "Distance to Origin :: "
-      + to_string_with_precision( sqrt(pow(this->state.p[0]-this->origin[0],2) +
-                                       pow(this->state.p[1]-this->origin[1],2) +
-                                       pow(this->state.p[2]-this->origin[2],2)), 4) + " meters"
+      + to_string_with_precision( sqrt(pow(state_p[0]-this->origin[0],2) +
+                                       pow(state_p[1]-this->origin[1],2) +
+                                       pow(state_p[2]-this->origin[2],2)), 4) + " meters"
     << "|" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
     << "Registration       :: keyframes: " + std::to_string(this->keyframes.size()) + ", "
@@ -1988,20 +2062,20 @@ void dlio::OdomNode::debug() {
 
   std::cout << std::right << std::setprecision(2) << std::fixed;
   std::cout << "| Computation Time :: "
-    << std::setfill(' ') << std::setw(6) << this->comp_times.back()*1000. << " ms    // Avg: "
+    << std::setfill(' ') << std::setw(6) << comp_times_snap.back()*1000. << " ms    // Avg: "
     << std::setw(6) << avg_comp_time*1000. << " / Max: "
-    << std::setw(6) << *std::max_element(this->comp_times.begin(), this->comp_times.end())*1000.
+    << std::setw(6) << *std::max_element(comp_times_snap.begin(), comp_times_snap.end())*1000.
     << "     |" << std::endl;
   std::cout << "| Cores Utilized   :: "
     << std::setfill(' ') << std::setw(6) << (cpu_percent/100.) * this->numProcessors << " cores // Avg: "
     << std::setw(6) << (avg_cpu_usage/100.) * this->numProcessors << " / Max: "
-    << std::setw(6) << (*std::max_element(this->cpu_percents.begin(), this->cpu_percents.end()) / 100.)
+    << std::setw(6) << (*std::max_element(cpu_percents_snap.begin(), cpu_percents_snap.end()) / 100.)
                        * this->numProcessors
     << "     |" << std::endl;
   std::cout << "| CPU Load         :: "
     << std::setfill(' ') << std::setw(6) << cpu_percent << " %     // Avg: "
     << std::setw(6) << avg_cpu_usage << " / Max: "
-    << std::setw(6) << *std::max_element(this->cpu_percents.begin(), this->cpu_percents.end())
+    << std::setw(6) << *std::max_element(cpu_percents_snap.begin(), cpu_percents_snap.end())
     << "     |" << std::endl;
   std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
     << "RAM Allocation   :: " + to_string_with_precision(resident_set/1000., 2) + " MB"
