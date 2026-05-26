@@ -34,19 +34,22 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
   this->lidar_cb_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   auto lidar_sub_opt = rclcpp::SubscriptionOptions();
   lidar_sub_opt.callback_group = this->lidar_cb_group;
-  this->lidar_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>("pointcloud", 1,
+
+  rclcpp::QoS sensor_data_qos = rclcpp::SensorDataQoS();
+
+  this->lidar_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>("pointcloud", sensor_data_qos,
       std::bind(&dlio::OdomNode::callbackPointCloud, this, std::placeholders::_1), lidar_sub_opt);
 
   this->imu_cb_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   auto imu_sub_opt = rclcpp::SubscriptionOptions();
   imu_sub_opt.callback_group = this->imu_cb_group;
-  this->imu_sub = this->create_subscription<sensor_msgs::msg::Imu>("imu", rclcpp::SensorDataQoS(),
+  this->imu_sub = this->create_subscription<sensor_msgs::msg::Imu>("imu", sensor_data_qos,
       std::bind(&dlio::OdomNode::callbackImu, this, std::placeholders::_1), imu_sub_opt);
 
   this->odom_pub     = this->create_publisher<nav_msgs::msg::Odometry>("odom", 1);
-  this->pose_pub     = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose", 1);
-  this->path_pub     = this->create_publisher<nav_msgs::msg::Path>("path", 1);
-  this->kf_pose_pub  = this->create_publisher<geometry_msgs::msg::PoseArray>("kf_pose", 1);
+  //this->pose_pub     = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose", 1);
+  //this->path_pub     = this->create_publisher<nav_msgs::msg::Path>("path", 1);
+  //this->kf_pose_pub  = this->create_publisher<geometry_msgs::msg::PoseArray>("kf_pose", 1);
   this->kf_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("kf_cloud", 1);
   this->deskewed_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("deskewed", 1);
 
@@ -368,7 +371,7 @@ void dlio::OdomNode::publishPose() {
   this->pose_ros.pose.orientation.y = q.y();
   this->pose_ros.pose.orientation.z = q.z();
 
-  this->pose_pub->publish(this->pose_ros);
+  //this->pose_pub->publish(this->pose_ros);
 
 }
 
@@ -400,7 +403,7 @@ void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published
   pose.pose.orientation.z = q.z();
 
   this->path_ros.poses.push_back(pose);
-  this->path_pub->publish(this->path_ros);
+  //this->path_pub->publish(this->path_ros);
 
   // transform: odom to baselink
   geometry_msgs::msg::TransformStamped transformStamped;
@@ -491,7 +494,7 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
   // Publish
   this->kf_pose_ros.header.stamp = timestamp;
   this->kf_pose_ros.header.frame_id = this->odom_frame;
-  this->kf_pose_pub->publish(this->kf_pose_ros);
+  //this->kf_pose_pub->publish(this->kf_pose_ros);
 
   // publish keyframe scan for map
   if (this->vf_use_) {
