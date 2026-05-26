@@ -432,11 +432,11 @@ void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published
   transformStamped.transform.translation.y = this->extrinsics.baselink2imu.t[1];
   transformStamped.transform.translation.z = this->extrinsics.baselink2imu.t[2];
 
-  Eigen::Quaternionf q(this->extrinsics.baselink2imu.R);
-  transformStamped.transform.rotation.w = q.w();
-  transformStamped.transform.rotation.x = q.x();
-  transformStamped.transform.rotation.y = q.y();
-  transformStamped.transform.rotation.z = q.z();
+  Eigen::Quaternionf q2(this->extrinsics.baselink2imu.R);
+  transformStamped.transform.rotation.w = q2.w();
+  transformStamped.transform.rotation.x = q2.x();
+  transformStamped.transform.rotation.y = q2.y();
+  transformStamped.transform.rotation.z = q2.z();
 
   br->sendTransform(transformStamped);
 
