@@ -1406,10 +1406,16 @@ sensor_msgs::msg::Imu::SharedPtr dlio::OdomNode::transformImu(const sensor_msgs:
   imu->header = imu_raw->header;
 
   double imu_stamp_secs = rclcpp::Time(imu->header.stamp).seconds();
+
+  // prev_stamp is a function-static raced by concurrent callbackImu threads — protect with mtx_imu
   static double prev_stamp = imu_stamp_secs;
-  double dt = imu_stamp_secs - prev_stamp;
-  prev_stamp = imu_stamp_secs;
-  
+  double dt;
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_imu);
+    dt = imu_stamp_secs - prev_stamp;
+    prev_stamp = imu_stamp_secs;
+  }
+
   if (dt == 0) { dt = 1.0/200.0; }
 
   // Transform angular velocity (will be the same on a rigid body, so just rotate to ROS convention)
@@ -1423,7 +1429,14 @@ sensor_msgs::msg::Imu::SharedPtr dlio::OdomNode::transformImu(const sensor_msgs:
   imu->angular_velocity.y = ang_vel_cg[1];
   imu->angular_velocity.z = ang_vel_cg[2];
 
+  // ang_vel_cg_prev is a function-static raced by concurrent callbackImu threads — protect with mtx_imu
   static Eigen::Vector3f ang_vel_cg_prev = ang_vel_cg;
+  Eigen::Vector3f ang_vel_cg_prev_val;
+  {
+    std::lock_guard<std::mutex> lock(this->mtx_imu);
+    ang_vel_cg_prev_val = ang_vel_cg_prev;
+    ang_vel_cg_prev = ang_vel_cg;
+  }
 
   // Transform linear acceleration (need to account for component due to translational difference)
   Eigen::Vector3f lin_accel(imu_raw->linear_acceleration.x,
@@ -1433,10 +1446,8 @@ sensor_msgs::msg::Imu::SharedPtr dlio::OdomNode::transformImu(const sensor_msgs:
   Eigen::Vector3f lin_accel_cg = this->extrinsics.baselink2imu.R * lin_accel;
 
   lin_accel_cg = lin_accel_cg
-                 + ((ang_vel_cg - ang_vel_cg_prev) / dt).cross(-this->extrinsics.baselink2imu.t)
+                 + ((ang_vel_cg - ang_vel_cg_prev_val) / dt).cross(-this->extrinsics.baselink2imu.t)
                  + ang_vel_cg.cross(ang_vel_cg.cross(-this->extrinsics.baselink2imu.t));
-
-  ang_vel_cg_prev = ang_vel_cg;
 
   imu->linear_acceleration.x = lin_accel_cg[0];
   imu->linear_acceleration.y = lin_accel_cg[1];
