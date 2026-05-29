@@ -28,6 +28,8 @@ find_package(Threads REQUIRED)
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_STANDARD 17)
 
+add_compile_options(-O3 -funroll-loops -fopt-info-vec-optimized) # -mtune=native -march=native 
+
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 
