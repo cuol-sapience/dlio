@@ -12,7 +12,7 @@
 
 cmake_minimum_required(VERSION 3.12.4)
 project(direct_lidar_inertial_odometry)
-find_package(rosidl_default_generators REQUIRED)
+#find_package(rosidl_default_generators REQUIRED)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -48,6 +48,7 @@ include_directories(${PCL_INCLUDE_DIRS})
 include_directories(${EIGEN3_INCLUDE_DIR})
 
 include_directories(include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../whirlwind/shm/include)
 include_directories(SYSTEM)
 
 # NanoFLANN
@@ -67,7 +68,7 @@ ament_target_dependencies(nano_gicp)
 
 # Odometry Node
 add_executable(dlio_odom_node src/dlio/odom_node.cc src/dlio/odom.cc)
-target_link_libraries(dlio_odom_node ${PCL_LIBRARIES} ${OpenMP_LIBS} Threads::Threads nano_gicp)
+target_link_libraries(dlio_odom_node ${PCL_LIBRARIES} ${OpenMP_LIBS} Threads::Threads nano_gicp rt)
 ament_target_dependencies(dlio_odom_node "tf2_ros" "pcl_ros" "nav_msgs" "pcl_conversions" "rclcpp" "sensor_msgs" "geometry_msgs")
 
 # Mapping Node

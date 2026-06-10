@@ -13,6 +13,7 @@
 #include "dlio/odom.h"
 #include "dlio/utils.h"
 
+#include <chrono>
 #include <queue>
 
 #include "rclcpp/qos.hpp"
@@ -30,21 +31,6 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
   else {this->imu_calibrated = true;}
   this->deskew_status = false;
   this->deskew_size = 0;
-
-  this->lidar_cb_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-  auto lidar_sub_opt = rclcpp::SubscriptionOptions();
-  lidar_sub_opt.callback_group = this->lidar_cb_group;
-
-  rclcpp::QoS sensor_data_qos = rclcpp::SensorDataQoS();
-
-  this->lidar_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>("pointcloud", sensor_data_qos,
-      std::bind(&dlio::OdomNode::callbackPointCloud, this, std::placeholders::_1), lidar_sub_opt);
-
-  this->imu_cb_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-  auto imu_sub_opt = rclcpp::SubscriptionOptions();
-  imu_sub_opt.callback_group = this->imu_cb_group;
-  this->imu_sub = this->create_subscription<sensor_msgs::msg::Imu>("imu", sensor_data_qos,
-      std::bind(&dlio::OdomNode::callbackImu, this, std::placeholders::_1), imu_sub_opt);
 
   this->odom_pub     = this->create_publisher<nav_msgs::msg::Odometry>("odom", 1);
   //this->pose_pub     = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose", 1);
@@ -96,6 +82,7 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
   this->submap_kf_idx_prev.clear();
 
   this->first_scan_stamp = 0.;
+  this->prev_scan_stamp = 0.;
   this->elapsed_time = 0.;
   this->length_traversed;
 
@@ -176,9 +163,20 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
   }
   fclose(file);
 
+  // Start SHM polling threads after all members are fully initialised.
+  // (ROS subscriptions in the original code only received messages after
+  //  executor.spin() — equivalent guarantee here.)
+  this->shm_running_ = true;
+  this->shm_imu_thread_  = std::thread(&dlio::OdomNode::shmImuThread,  this);
+  this->shm_scan_thread_ = std::thread(&dlio::OdomNode::shmScanThread, this);
+
 }
 
-dlio::OdomNode::~OdomNode() {}
+dlio::OdomNode::~OdomNode() {
+  this->shm_running_ = false;
+  if (this->shm_imu_thread_.joinable())  this->shm_imu_thread_.join();
+  if (this->shm_scan_thread_.joinable()) this->shm_scan_thread_.join();
+}
 
 void dlio::OdomNode::getParams() {
 
@@ -515,43 +513,34 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
 
 }
 
-void dlio::OdomNode::getScanFromROS(const sensor_msgs::msg::PointCloud2::SharedPtr& pc) {
+void dlio::OdomNode::getScanFromShm(const whirlwind::shm::ShmScanSlot& slot) {
 
-  pcl::PointCloud<PointType>::Ptr original_scan_ = std::make_shared<pcl::PointCloud<PointType>>();
-  pcl::fromROSMsg(*pc, *original_scan_);
+  auto original_scan_ = std::make_shared<pcl::PointCloud<PointType>>();
+  original_scan_->reserve(slot.n_points);
 
-  // Remove NaNs
-  std::vector<int> idx;
-  original_scan_->is_dense = false;
-  pcl::removeNaNFromPointCloud(*original_scan_, *original_scan_, idx);
+  for (uint32_t i = 0; i < slot.n_points; ++i) {
+    const auto& sp = slot.points[i];
+    if (std::isnan(sp.x) || std::isnan(sp.y) || std::isnan(sp.z)) continue;
+    PointType p;
+    p.x = sp.x;
+    p.y = sp.y;
+    p.z = sp.z;
+    p.intensity = sp.intensity;
+    p.t = sp.t; // ns since scan start — Ouster format
+    original_scan_->push_back(p);
+  }
 
-  // Crop Box Filter
+  // Crop Box Filter — must use a separate output cloud; PCL clears the output
+  // before filtering, so passing the same cloud as input and output empties it.
+  pcl::PointCloud<PointType>::Ptr cropped = std::make_shared<pcl::PointCloud<PointType>>();
   this->crop.setInputCloud(original_scan_);
-  this->crop.filter(*original_scan_);
+  this->crop.filter(*cropped);
+  original_scan_ = cropped;
 
-  // automatically detect sensor type
-  this->sensor = dlio::SensorType::UNKNOWN;
-  for (auto &field : pc->fields) {
-    if (field.name == "t") {
-      this->sensor = dlio::SensorType::OUSTER;
-      break;
-    } else if (field.name == "time") {
-      this->sensor = dlio::SensorType::VELODYNE;
-      break;
-    } else if (field.name == "timestamp" && original_scan_->points[0].timestamp < 1e14) {
-      this->sensor = dlio::SensorType::HESAI;
-      break;
-    } else if (field.name == "timestamp" && original_scan_->points[0].timestamp > 1e14) {
-      this->sensor = dlio::SensorType::LIVOX;
-      break;
-    }
-  }
+  // SHM data is always Ouster-format (per-point t in nanoseconds)
+  this->sensor = dlio::SensorType::OUSTER;
 
-  if (this->sensor == dlio::SensorType::UNKNOWN) {
-    this->deskew_ = false;
-  }
-
-  this->scan_header_stamp = pc->header.stamp;
+  this->scan_header_stamp = rclcpp::Time(static_cast<int64_t>(slot.stamp * 1e9));
   this->original_scan = original_scan_;
 
 }
@@ -616,6 +605,10 @@ void dlio::OdomNode::preprocessPoints() {
 }
 
 void dlio::OdomNode::deskewPointcloud() {
+
+  if (this->original_scan->points.empty()) {
+    return;
+  }
 
   pcl::PointCloud<PointType>::Ptr deskewed_scan_ = std::make_shared<pcl::PointCloud<PointType>>(1, this->original_scan->points.size());
   // deskewed_scan_->points.resize(this->original_scan->points.size());
@@ -703,6 +696,7 @@ void dlio::OdomNode::deskewPointcloud() {
     }
 
     this->first_valid_scan = true;
+    this->prev_scan_stamp = this->scan_stamp;
     this->T_prior = this->T; // assume no motion for the first scan
     pcl::transformPointCloud (*deskewed_scan_, *deskewed_scan_, this->T_prior * this->extrinsics.baselink2lidar_T);
     this->deskewed_scan = deskewed_scan_;
@@ -778,17 +772,19 @@ void dlio::OdomNode::initializeDLIO() {
 
 }
 
-void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr pc) {
+void dlio::OdomNode::callbackPointCloud(const whirlwind::shm::ShmScanSlot& slot) {
 
   std::unique_lock<decltype(this->main_loop_running_mutex)> lock(main_loop_running_mutex);
   this->main_loop_running = true;
   lock.unlock();
 
-  double then = this->now().seconds();
+  // Join previous-scan threads before touching any shared state they read.
+  // Detached threads race with this call and corrupt heap metadata (double-free).
+  if (this->metrics_thread.joinable()) this->metrics_thread.join();
+  if (this->publish_thread.joinable())  this->publish_thread.join();
+  if (this->debug_thread.joinable())    this->debug_thread.join();
 
-  if (this->first_scan_stamp == 0.) {
-    this->first_scan_stamp = rclcpp::Time(pc->header.stamp).seconds();
-  }
+  auto then = std::chrono::steady_clock::now();
 
   // DLIO Initialization procedures (IMU calib, gravity align)
   if (!this->dlio_initialized) {
@@ -796,7 +792,15 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   }
 
   // Convert incoming scan into DLIO format
-  this->getScanFromROS(pc);
+  this->getScanFromShm(slot);
+
+  if (this->first_scan_stamp == 0.) {
+    this->first_scan_stamp = rclcpp::Time(this->scan_header_stamp).seconds();
+  }
+
+  // Snapshot the previous scan stamp before it is advanced to scan_stamp at the
+  // end of this callback — used only for the LiDAR-rate computation below.
+  const double prev_stamp_for_rate = this->prev_scan_stamp;
 
   // Preprocess points
   this->preprocessPoints();
@@ -807,12 +811,18 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
 
   if (this->current_scan->points.size() <= this->gicp_min_num_points_) {
     RCLCPP_FATAL(this->get_logger(), "Low number of points in the cloud!");
+    // Keep prev_scan_stamp current even when the scan is too sparse for GICP,
+    // so a run of "Low number of points" returns doesn't freeze it until it
+    // falls outside the IMU buffer window ("Bad time sync"). This must NOT run
+    // on the normal path before getNextPose(): updateState() uses
+    // (scan_stamp - prev_scan_stamp) as its observer dt, and zeroing it
+    // disables the LiDAR/GICP correction entirely (pure IMU dead-reckoning).
+    this->prev_scan_stamp = this->scan_stamp;
     return;
   }
 
   // Compute Metrics
   this->metrics_thread = std::thread( &dlio::OdomNode::computeMetrics, this );
-  this->metrics_thread.detach();
 
   // Set Adaptive Parameters
   if (this->adaptive_params_) {
@@ -854,7 +864,8 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   {
     std::lock_guard<std::mutex> lock(this->mtx_debug);
     this->trajectory.push_back(std::make_pair(this->state.p, this->state.q));
-    this->lidar_rates.push_back(1. / (this->scan_stamp - this->prev_scan_stamp));
+    if (prev_stamp_for_rate > 0. && this->scan_stamp > prev_stamp_for_rate)
+      this->lidar_rates.push_back(1. / (this->scan_stamp - prev_stamp_for_rate));
   }
   this->prev_scan_stamp = this->scan_stamp;
   this->elapsed_time = this->scan_stamp - this->first_scan_stamp;
@@ -867,18 +878,16 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
     published_cloud = this->deskewed_scan;
   }
   this->publish_thread = std::thread( &dlio::OdomNode::publishToROS, this, published_cloud, this->T_corr );
-  this->publish_thread.detach();
 
   // Update some statistics (protected against concurrent debug() reads)
   {
     std::lock_guard<std::mutex> lock(this->mtx_debug);
-    this->comp_times.push_back(this->now().seconds() - then);
+    this->comp_times.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - then).count());
   }
   this->gicp_hasConverged = this->gicp.hasConverged();
 
   // Debug statements and publish custom DLIO message
   this->debug_thread = std::thread( &dlio::OdomNode::debug, this );
-  this->debug_thread.detach();
 
   this->geo.first_opt_done = true;
 
@@ -1467,7 +1476,7 @@ void dlio::OdomNode::computeSpaciousness() {
   // compute range of points
   std::vector<float> ds;
 
-  for (int i = 0; i <= this->original_scan->points.size(); i++) {
+  for (int i = 0; i < this->original_scan->points.size(); i++) {
     float d = std::sqrt(pow(this->original_scan->points[i].x, 2) +
                         pow(this->original_scan->points[i].y, 2));
     ds.push_back(d);
@@ -1837,9 +1846,11 @@ void dlio::OdomNode::buildKeyframesAndSubmap(State vehicle_state) {
     this->keyframes[i].second = transformed_keyframe;
     this->keyframe_normals[i] = transformed_covariances;
 
+    if (this->publish_keyframe_thread.joinable()) this->publish_keyframe_thread.join();
     this->publish_keyframe_thread = std::thread( &dlio::OdomNode::publishKeyframe, this, this->keyframes[i], this->keyframe_timestamps[i] );
-    this->publish_keyframe_thread.detach();
   }
+
+  if (this->publish_keyframe_thread.joinable()) this->publish_keyframe_thread.join();
 
   lock.unlock();
 
@@ -1921,7 +1932,9 @@ void dlio::OdomNode::debug() {
     avg_imu_rate =
       std::accumulate(imu_rates_snap.end()-win_size, imu_rates_snap.end(), 0.0) / win_size;
   }
-  if (lidar_rates_snap.size() < win_size) {
+  if (lidar_rates_snap.empty()) {
+    avg_lidar_rate = 0.0;
+  } else if (lidar_rates_snap.size() < win_size) {
     avg_lidar_rate =
       std::accumulate(lidar_rates_snap.begin(), lidar_rates_snap.end(), 0.0) / lidar_rates_snap.size();
   } else {
@@ -2097,4 +2110,99 @@ void dlio::OdomNode::debug() {
 
   std::cout << "+-------------------------------------------------------------------+" << std::endl;
 
+}
+
+// =============================================================================
+// SHM polling threads — replace ROS pointcloud + IMU subscriptions
+// =============================================================================
+
+void dlio::OdomNode::shmImuThread() {
+
+  std::unique_ptr<whirlwind::shm::ShmReader> reader;
+
+  // Retry until the SHM channel is available (live_client may not be up yet)
+  while (this->shm_running_ && !reader) {
+    try {
+      reader = std::make_unique<whirlwind::shm::ShmReader>();
+    } catch (const std::exception& e) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                           "shmImuThread: waiting for SHM channel (%s)", e.what());
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+  }
+  if (!reader) return;
+
+  uint64_t cursor = reader->imu_head();
+
+  while (this->shm_running_) {
+    const uint64_t head = reader->imu_head();
+
+    if (head - cursor > whirlwind::shm::N_IMU_SLOTS) {
+      RCLCPP_WARN(this->get_logger(), "shmImuThread: dropped %llu IMU samples",
+                  static_cast<unsigned long long>(head - cursor - whirlwind::shm::N_IMU_SLOTS));
+      cursor = head - whirlwind::shm::N_IMU_SLOTS;
+    }
+
+    if (cursor < head) {
+      const auto& slot = reader->imu_slot(cursor++);
+
+      // Wrap SHM slot as a sensor_msgs::Imu so callbackImu/transformImu are unchanged
+      auto msg = std::make_shared<sensor_msgs::msg::Imu>();
+      msg->header.stamp = rclcpp::Time(static_cast<int64_t>(slot.stamp * 1e9));
+      msg->angular_velocity.x    = slot.gyro[0];
+      msg->angular_velocity.y    = slot.gyro[1];
+      msg->angular_velocity.z    = slot.gyro[2];
+      msg->linear_acceleration.x = slot.accel[0];
+      msg->linear_acceleration.y = slot.accel[1];
+      msg->linear_acceleration.z = slot.accel[2];
+
+      this->callbackImu(msg);
+    } else {
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+  }
+}
+
+void dlio::OdomNode::shmScanThread() {
+
+  std::unique_ptr<whirlwind::shm::ShmReader> reader;
+
+  while (this->shm_running_ && !reader) {
+    try {
+      reader = std::make_unique<whirlwind::shm::ShmReader>();
+    } catch (const std::exception& e) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                           "shmScanThread: waiting for SHM channel (%s)", e.what());
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+  }
+  if (!reader) return;
+
+  uint64_t cursor = reader->scan_head();
+
+  // Heap-allocated copy buffer — ShmScanSlot is ~6 MB, too large for the stack.
+  // Reused across iterations to avoid per-scan allocation overhead.
+  auto slot_buf = std::make_unique<whirlwind::shm::ShmScanSlot>();
+
+  while (this->shm_running_) {
+    const uint64_t head = reader->scan_head();
+
+    if (head - cursor > whirlwind::shm::N_SCAN_SLOTS) {
+      RCLCPP_WARN(this->get_logger(), "shmScanThread: dropped %llu scans",
+                  static_cast<unsigned long long>(head - cursor - whirlwind::shm::N_SCAN_SLOTS));
+      cursor = head - whirlwind::shm::N_SCAN_SLOTS;
+    }
+
+    if (cursor < head) {
+      // Copy slot contents to local memory before advancing the cursor.
+      // The SHM writer can reuse this slot as soon as we ack; holding a
+      // reference into SHM across the full DLIO pipeline (~50 ms, only 4
+      // slots) risks a torn read when the ring wraps.
+      *slot_buf = reader->scan_slot(cursor);
+      ++cursor;
+      this->callbackPointCloud(*slot_buf);
+    } else {
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+  }
 }

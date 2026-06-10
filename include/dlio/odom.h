@@ -38,6 +38,9 @@
 #include <pcl/surface/convex_hull.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+// Whirlwind SHM channel
+#include "whirlwind/shm/channel.hpp"
+
 class dlio::OdomNode: public rclcpp::Node {
 
 public:
@@ -54,7 +57,7 @@ private:
 
   void getParams();
 
-  void callbackPointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr pc);
+  void callbackPointCloud(const whirlwind::shm::ShmScanSlot& slot);
   void callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu);
 
   void publishPose();
@@ -64,7 +67,7 @@ private:
   void publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>,
                        pcl::PointCloud<PointType>::ConstPtr> kf, rclcpp::Time timestamp);
 
-  void getScanFromROS(const sensor_msgs::msg::PointCloud2::SharedPtr& pc);
+  void getScanFromShm(const whirlwind::shm::ShmScanSlot& slot);
   void preprocessPoints();
   void deskewPointcloud();
   void initializeInputTarget();
@@ -110,10 +113,12 @@ private:
 
   rclcpp::TimerBase::SharedPtr publish_timer;
 
-  // Subscribers
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
-  rclcpp::CallbackGroup::SharedPtr lidar_cb_group, imu_cb_group;
+  // SHM input threads (replace ROS pointcloud + IMU subscriptions)
+  std::atomic<bool> shm_running_;
+  std::thread shm_imu_thread_;
+  std::thread shm_scan_thread_;
+  void shmImuThread();
+  void shmScanThread();
 
   // Publishers
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub;
