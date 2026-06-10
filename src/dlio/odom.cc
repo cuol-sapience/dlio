@@ -838,7 +838,20 @@ void dlio::OdomNode::callbackPointCloud(const whirlwind::shm::ShmScanSlot& slot)
     this->main_loop_running = false;
     this->submap_future =
       std::async( std::launch::async, &dlio::OdomNode::buildKeyframesAndSubmap, this, this->state );
-    this->submap_future.wait(); // wait until completion
+    return;
+  }
+
+  // Initial submap still building — skip rather than block so the SHM reader
+  // stays live and doesn't drop scans. Keep prev_scan_stamp current so the
+  // first real alignment sees dt ~= one scan period, not the full build time.
+  if (!this->geo.first_opt_done &&
+      this->submap_future.valid() &&
+      this->submap_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+    this->prev_scan_stamp = this->scan_stamp;
+    lock.lock();
+    this->main_loop_running = false;
+    lock.unlock();
+    this->submap_build_cv.notify_one();
     return;
   }
 
@@ -1355,6 +1368,24 @@ void dlio::OdomNode::updateState() {
   Eigen::Vector3f pin = this->lidarPose.p;
   Eigen::Quaternionf qin = this->lidarPose.q;
   double dt = this->scan_stamp - this->prev_scan_stamp;
+
+  // If the gap since the last processed scan is too large the IMU state has
+  // drifted too far for the proportional observer to correct safely — the
+  // dt-scaled gains overshoot and corrupt velocity, which then drives
+  // dead-reckoning hundreds of metres off on the next scan.  Hard-reset the
+  // state directly from the GICP result instead.
+  if (dt > 0.5) {
+    RCLCPP_WARN(this->get_logger(),
+      "updateState: large scan gap (%.2f s), hard-resetting state from GICP", dt);
+    this->state.p = pin;
+    this->state.q = qin;
+    this->state.v.lin.w = Eigen::Vector3f::Zero();
+    this->state.v.lin.b = Eigen::Vector3f::Zero();
+    this->geo.prev_p   = this->state.p;
+    this->geo.prev_q   = this->state.q;
+    this->geo.prev_vel = this->state.v.lin.w;
+    return;
+  }
 
   Eigen::Quaternionf qe, qhat, qcorr;
   qhat = this->state.q;
