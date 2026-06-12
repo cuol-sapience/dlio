@@ -28,6 +28,7 @@ find_package(Threads REQUIRED)
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_STANDARD 17)
 
+set(BUILD_SHARED_LIBS OFF)
 add_compile_options(-O3 -funroll-loops -fopt-info-vec-optimized) # -mtune=native -march=native 
 
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
@@ -48,7 +49,20 @@ include_directories(${PCL_INCLUDE_DIRS})
 include_directories(${EIGEN3_INCLUDE_DIR})
 
 include_directories(include)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../whirlwind/shm/include)
+
+
+include(FetchContent)
+FetchContent_Declare(
+ sprint
+  GIT_REPOSITORY https://github.com/cuol-sapience/libsprint
+  GIT_TAG        e7cf4483410d4d358d2998091c2012656dbc2a20
+)
+FetchContent_MakeAvailable(sprint)
+
+link_libraries(sprint::ipc)
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../whirlwind/ipc_ext/include)
+
 include_directories(SYSTEM)
 
 # NanoFLANN

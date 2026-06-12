@@ -513,7 +513,7 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
 
 }
 
-void dlio::OdomNode::getScanFromShm(const whirlwind::shm::ShmScanSlot& slot) {
+void dlio::OdomNode::getScanFromShm(const sprint::ipc::WhlScanSlot& slot) {
 
   auto original_scan_ = std::make_shared<pcl::PointCloud<PointType>>();
   original_scan_->reserve(slot.n_points);
@@ -772,7 +772,7 @@ void dlio::OdomNode::initializeDLIO() {
 
 }
 
-void dlio::OdomNode::callbackPointCloud(const whirlwind::shm::ShmScanSlot& slot) {
+void dlio::OdomNode::callbackPointCloud(const sprint::ipc::WhlScanSlot& slot) {
 
   std::unique_lock<decltype(this->main_loop_running_mutex)> lock(main_loop_running_mutex);
   this->main_loop_running = true;
@@ -2149,91 +2149,64 @@ void dlio::OdomNode::debug() {
 
 void dlio::OdomNode::shmImuThread() {
 
-  std::unique_ptr<whirlwind::shm::ShmReader> reader;
+  std::unique_ptr<sprint::ipc::ImuConsumer<>> reader;
 
-  // Retry until the SHM channel is available (live_client may not be up yet)
   while (this->shm_running_ && !reader) {
     try {
-      reader = std::make_unique<whirlwind::shm::ShmReader>();
+      reader = std::make_unique<sprint::ipc::ImuConsumer<>>("/imu0");
     } catch (const std::exception& e) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "shmImuThread: waiting for SHM channel (%s)", e.what());
+                           "shmImuThread: waiting for IPC channel (%s)", e.what());
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
   }
   if (!reader) return;
 
-  uint64_t cursor = reader->imu_head();
-
   while (this->shm_running_) {
-    const uint64_t head = reader->imu_head();
+    auto frame = reader->wait_next(500'000ULL); // 500 µs timeout
+    if (!frame) continue;
 
-    if (head - cursor > whirlwind::shm::N_IMU_SLOTS) {
-      RCLCPP_WARN(this->get_logger(), "shmImuThread: dropped %llu IMU samples",
-                  static_cast<unsigned long long>(head - cursor - whirlwind::shm::N_IMU_SLOTS));
-      cursor = head - whirlwind::shm::N_IMU_SLOTS;
-    }
+    // Wrap slot as sensor_msgs::Imu so callbackImu/transformImu are unchanged
+    const auto& slot = *frame->ptr;
+    auto msg = std::make_shared<sensor_msgs::msg::Imu>();
+    msg->header.stamp = rclcpp::Time(static_cast<int64_t>(slot.stamp * 1e9));
+    msg->angular_velocity.x    = slot.gyro[0];
+    msg->angular_velocity.y    = slot.gyro[1];
+    msg->angular_velocity.z    = slot.gyro[2];
+    msg->linear_acceleration.x = slot.accel[0];
+    msg->linear_acceleration.y = slot.accel[1];
+    msg->linear_acceleration.z = slot.accel[2];
 
-    if (cursor < head) {
-      const auto& slot = reader->imu_slot(cursor++);
-
-      // Wrap SHM slot as a sensor_msgs::Imu so callbackImu/transformImu are unchanged
-      auto msg = std::make_shared<sensor_msgs::msg::Imu>();
-      msg->header.stamp = rclcpp::Time(static_cast<int64_t>(slot.stamp * 1e9));
-      msg->angular_velocity.x    = slot.gyro[0];
-      msg->angular_velocity.y    = slot.gyro[1];
-      msg->angular_velocity.z    = slot.gyro[2];
-      msg->linear_acceleration.x = slot.accel[0];
-      msg->linear_acceleration.y = slot.accel[1];
-      msg->linear_acceleration.z = slot.accel[2];
-
-      this->callbackImu(msg);
-    } else {
-      std::this_thread::sleep_for(std::chrono::microseconds(500));
-    }
+    this->callbackImu(msg);
   }
 }
 
 void dlio::OdomNode::shmScanThread() {
 
-  std::unique_ptr<whirlwind::shm::ShmReader> reader;
+  std::unique_ptr<sprint::ipc::ScanConsumer<>> reader;
 
   while (this->shm_running_ && !reader) {
     try {
-      reader = std::make_unique<whirlwind::shm::ShmReader>();
+      reader = std::make_unique<sprint::ipc::ScanConsumer<>>("/pcl_lidar0");
     } catch (const std::exception& e) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "shmScanThread: waiting for SHM channel (%s)", e.what());
+                           "shmScanThread: waiting for IPC channel (%s)", e.what());
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
   }
   if (!reader) return;
 
-  uint64_t cursor = reader->scan_head();
-
-  // Heap-allocated copy buffer — ShmScanSlot is ~6 MB, too large for the stack.
-  // Reused across iterations to avoid per-scan allocation overhead.
-  auto slot_buf = std::make_unique<whirlwind::shm::ShmScanSlot>();
+  // Heap-allocated copy buffer — WhlScanSlot is ~6 MB, too large for the stack.
+  // Copy out of the ring before processing so the producer can reclaim the slot.
+  auto slot_buf = std::make_unique<sprint::ipc::WhlScanSlot>();
 
   while (this->shm_running_) {
-    const uint64_t head = reader->scan_head();
+    // catch_up() uses ANY_NEW wait mode: the producer signals us on every
+    // publish, so we never get stuck when OVERWRITE_OLDEST skips frames.
+    auto frame = reader->catch_up(500'000ULL);
+    if (!frame) continue;
 
-    if (head - cursor > whirlwind::shm::N_SCAN_SLOTS) {
-      RCLCPP_WARN(this->get_logger(), "shmScanThread: dropped %llu scans",
-                  static_cast<unsigned long long>(head - cursor - whirlwind::shm::N_SCAN_SLOTS));
-      cursor = head - whirlwind::shm::N_SCAN_SLOTS;
-    }
-
-    if (cursor < head) {
-      // Copy slot contents to local memory before advancing the cursor.
-      // The SHM writer can reuse this slot as soon as we ack; holding a
-      // reference into SHM across the full DLIO pipeline (~50 ms, only 4
-      // slots) risks a torn read when the ring wraps.
-      *slot_buf = reader->scan_slot(cursor);
-      ++cursor;
-      this->callbackPointCloud(*slot_buf);
-    } else {
-      std::this_thread::sleep_for(std::chrono::microseconds(500));
-    }
+    *slot_buf = *frame->ptr;
+    this->callbackPointCloud(*slot_buf);
   }
 }
